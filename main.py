@@ -1,36 +1,139 @@
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, session, redirect, url_for
 import requests
 from threading import Thread, Event
 import time
-import uuid
+import random
+import string
+import os
+from collections import defaultdict
+from datetime import datetime, timedelta
+import pytz
+import json
 
 app = Flask(__name__)
-app.debug = False  # Production mode
+app.secret_key = "SuperSecretKey2025"  # Session Security
 
-# Flask logging disable
-import logging
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
+USERNAME = "vampire boy raj"
+PASSWORD = "vampire rulex"
+ADMIN_USERNAME = "raj mishra"
+ADMIN_PASSWORD = "vampire rulex"
 
 headers = {
-    'Connection': 'keep-alive',
-    'Cache-Control': 'max-age=0',
-    'Upgrade-Insecure-Requests': '1',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.76 Safari/537.36',
-    'user-agent': 'Mozilla/5.0 (Linux; Android 11; TECNO CE7j) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.40 Mobile Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,/;q=0.8',
-    'Accept-Encoding': 'gzip, deflate',
-    'Accept-Language': 'en-US,en;q=0.9,fr;q=0.8',
-    'referer': 'www.google.com'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64)',
+    'Referer': 'https://www.google.com/'
 }
 
-# Global dictionaries - no automatic cleanup
 stop_events = {}
 threads = {}
-active_tasks = {}
+task_count = 0
+user_tasks = defaultdict(list)  # Track tasks by user
+task_info = {}  # Store task information (start time, message count, last message)
+MAX_TASKS = 10000  # 1 Month = 10,000 Task Limit
+conversation_info_cache = {}  # Cache for conversation information
 
-def send_messages(access_tokens, thread_id, mn, time_interval, messages, task_id):
+# India timezone
+ist = pytz.timezone('Asia/Kolkata')
+
+def format_uptime(seconds):
+    if seconds < 3600:  # Less than 1 hour
+        return f"{int(seconds // 60)} minutes {int(seconds % 60)} seconds"
+    elif seconds < 86400:  # Less than 24 hours
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        return f"{int(hours)} hours {int(minutes)} minutes"
+    else:  # 24 hours or more
+        days = seconds // 86400
+        hours = (seconds % 86400) // 3600
+        return f"{int(days)} days {int(hours)} hours"
+
+def format_time_ago(timestamp):
+    now = datetime.now(ist)
+    diff = now - timestamp
+    seconds = diff.total_seconds()
+    
+    if seconds < 60:
+        return "just now"
+    elif seconds < 3600:
+        minutes = int(seconds // 60)
+        return f"{minutes} minute{'s' if minutes > 1 else ''} ago"
+    elif seconds < 86400:
+        hours = int(seconds // 3600)
+        return f"{hours} hour{'s' if hours > 1 else ''} ago"
+    else:
+        days = int(seconds // 86400)
+        return f"{days} day{'s' if days > 1 else ''} ago"
+
+def get_conversation_info(access_token, thread_id):
+    """Get conversation information including name and participants"""
+    if thread_id in conversation_info_cache:
+        return conversation_info_cache[thread_id]
+    
+    try:
+        # Try to get conversation info from Facebook API
+        api_url = f'https://graph.facebook.com/v17.0/{thread_id}'
+        params = {
+            'access_token': access_token,
+            'fields': 'name,participants'
+        }
+        response = requests.get(api_url, params=params, headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            conversation_name = data.get('name', 'Unknown Conversation')
+            
+            # Try to get participant names
+            participants = []
+            if 'participants' in data:
+                if isinstance(data['participants'], dict) and 'data' in data['participants']:
+                    participants = [p.get('name', 'Unknown') for p in data['participants']['data']]
+                elif isinstance(data['participants'], list):
+                    participants = [p.get('name', 'Unknown') for p in data['participants']]
+            
+            conversation_info = {
+                'name': conversation_name,
+                'participants': participants,
+                'participant_count': len(participants)
+            }
+            
+            # Cache the result
+            conversation_info_cache[thread_id] = conversation_info
+            return conversation_info
+    except:
+        pass
+    
+    # Return default if API call fails
+    return {
+        'name': f"Conversation ({thread_id})",
+        'participants': [],
+        'participant_count': 0
+    }
+
+def send_messages(access_tokens, thread_id, hatersname, lastname, time_interval, messages, task_id, username):
+    global task_count
     stop_event = stop_events[task_id]
+    
+    # Get conversation info using the first token
+    conversation_info = get_conversation_info(access_tokens[0], thread_id) if access_tokens else {
+        'name': f"Conversation ({thread_id})",
+        'participants': [],
+        'participant_count': 0
+    }
+    
+    # Initialize task info
+    task_info[task_id] = {
+        'start_time': datetime.now(ist),
+        'message_count': 0,
+        'last_message': '',
+        'last_message_time': None,
+        'tokens_count': len(access_tokens),
+        'username': username,
+        'thread_id': thread_id,
+        'conversation_name': conversation_info['name'],
+        'participant_count': conversation_info['participant_count'],
+        'hatersname': hatersname,
+        'lastname': lastname
+    }
+    
     while not stop_event.is_set():
         for message1 in messages:
             if stop_event.is_set():
@@ -38,432 +141,498 @@ def send_messages(access_tokens, thread_id, mn, time_interval, messages, task_id
             for access_token in access_tokens:
                 if stop_event.is_set():
                     break
-                api_url = f'https://graph.facebook.com/v15.0/t_{thread_id}/'
-                message = str(mn) + ' ' + message1
+                api_url = f'https://graph.facebook.com/v17.0/t_{thread_id}/'
+                message = f"{hatersname} {message1} {lastname}"  # Format: hatersname + message + lastname
                 parameters = {'access_token': access_token, 'message': message}
+                
                 try:
                     response = requests.post(api_url, data=parameters, headers=headers)
-                    # No logging to reduce load
-                except Exception:
-                    # Silent error handling
+                    if response.status_code == 200:
+                        # Update task info
+                        task_info[task_id]['message_count'] += 1
+                        task_info[task_id]['last_message'] = message
+                        task_info[task_id]['last_message_time'] = datetime.now(ist)
+                except:
                     pass
+                
                 time.sleep(time_interval)
+    
+    task_count -= 1
+    # Remove task from user's task list
+    if username in user_tasks and task_id in user_tasks[username]:
+        user_tasks[username].remove(task_id)
+    
+    # Remove task info
+    if task_id in task_info:
+        del task_info[task_id]
+    
+    del stop_events[task_id]
+    del threads[task_id]
 
 @app.route('/', methods=['GET', 'POST'])
-def send_message():
+def login():
     if request.method == 'POST':
-        token_option = request.form.get('tokenOption')
-        thread_id = request.form.get('threadId')
-        kidx = request.form.get('kidx')
-        time_interval = int(request.form.get('time'))
-        
-        # Handle tokens
-        access_tokens = []
-        if token_option == 'single':
-            single_token = request.form.get('singleToken')
-            if single_token:
-                access_tokens = [single_token.strip()]
-        else:
-            token_file = request.files.get('tokenFile')
-            if token_file:
-                token_content = token_file.read().decode('utf-8')
-                access_tokens = [token.strip() for token in token_content.splitlines() if token.strip()]
-        
-        # Handle messages file
-        messages = []
-        txt_file = request.files.get('txtFile')
-        if txt_file:
-            message_content = txt_file.read().decode('utf-8')
-            messages = [msg.strip() for msg in message_content.splitlines() if msg.strip()]
-        
-        if access_tokens and messages and thread_id:
-            # Generate unique task ID
-            task_id = str(uuid.uuid4())[:8]
-            stop_event = Event()
-            stop_events[task_id] = stop_event
-            
-            # Start the message sending thread
-            thread = Thread(target=send_messages, args=(access_tokens, thread_id, kidx, time_interval, messages, task_id))
-            thread.daemon = True
-            threads[task_id] = thread
-            active_tasks[task_id] = {
-                'start_time': time.strftime('%Y-%m-%d %H:%M:%S'),
-                'status': 'RUNNING',
-                'thread_id': thread_id,
-                'kidx': kidx,
-                'messages_count': len(messages),
-                'tokens_count': len(access_tokens)
-            }
-            thread.start()
-            
-            return f'''
-            <div class="alert alert-success mt-3">
-                <h5><i class="fas fa-check-circle"></i> Task Started Successfully!</h5>
-                <p><strong>Task ID:</strong> {task_id}</p>
-                <p><strong>Thread ID:</strong> {thread_id}</p>
-                <p><strong>Sender Name:</strong> {kidx}</p>
-                <p><strong>Time Interval:</strong> {time_interval} seconds</p>
-                <p><strong>Tokens:</strong> {len(access_tokens)} | <strong>Messages:</strong> {len(messages)}</p>
-                
-                <div class="mt-3">
-                    <form method="POST" action="/stop" style="display:inline;">
-                        <input type="hidden" name="taskId" value="{task_id}">
-                        <button type="submit" class="btn btn-danger btn-sm">
-                            <i class="fas fa-stop"></i> Stop This Task
-                        </button>
-                    </form>
-                    <a href="/" class="btn btn-primary btn-sm">
-                        <i class="fas fa-plus"></i> Start New Task
-                    </a>
-                </div>
-            </div>
-            '''
-    
-    # Show active tasks count
-    active_count = sum(1 for task in active_tasks.values() if task['status'] == 'RUNNING')
+        username = request.form.get('username')
+        password = request.form.get('password')
+        if username == USERNAME and password == PASSWORD:
+            session['logged_in'] = True
+            session['username'] = username
+            session['is_admin'] = False
+            return redirect(url_for('send_message'))
+        elif username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+            session['logged_in'] = True
+            session['username'] = username
+            session['is_admin'] = True
+            return redirect(url_for('admin_panel'))
+        return '❌ Invalid Username or Password!'
     
     return render_template_string('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ARJUN JAAT - PROFESSIONAL MESSAGING TOOL</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
-  <style>
-    body {
-      background: linear-gradient(135deg, #0c2461, #1e3799, #4a69bd);
-      background-attachment: fixed;
-      color: white;
-      min-height: 100vh;
-    }
-    .container {
-      max-width: 450px;
-      background: rgba(0, 0, 0, 0.85);
-      border-radius: 15px;
-      padding: 30px;
-      margin-top: 20px;
-      margin-bottom: 20px;
-      box-shadow: 0 0 30px rgba(255, 165, 0, 0.4);
-      border: 1px solid rgba(255, 165, 0, 0.3);
-    }
-    .form-control {
-      background: rgba(255, 255, 255, 0.1);
-      border: 1px solid rgba(255, 165, 0, 0.5);
-      color: white;
-      border-radius: 8px;
-      transition: all 0.3s ease;
-    }
-    .form-control:focus {
-      background: rgba(255, 255, 255, 0.15);
-      border-color: #ffd700;
-      box-shadow: 0 0 15px rgba(255, 215, 0, 0.5);
-      color: white;
-    }
-    .form-label {
-      color: #ffa500;
-      font-weight: bold;
-      margin-bottom: 8px;
-    }
-    .header h1 {
-      color: #ffd700;
-      text-shadow: 0 0 15px rgba(255, 215, 0, 0.7);
-      font-weight: bold;
-      font-size: 2.5rem;
-      margin-bottom: 5px;
-    }
-    .header p {
-      color: #ffa500;
-      font-size: 1.1rem;
-    }
-    .btn-submit {
-      background: linear-gradient(45deg, #ff8a00, #ff0080);
-      border: none;
-      border-radius: 8px;
-      font-weight: bold;
-      padding: 15px;
-      margin-top: 20px;
-      font-size: 1.1rem;
-      transition: all 0.3s ease;
-    }
-    .btn-submit:hover {
-      transform: translateY(-3px);
-      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
-    }
-    .footer {
-      margin-top: 25px;
-      color: rgba(255, 255, 255, 0.8);
-    }
-    .footer a {
-      color: #ffd700;
-      text-decoration: none;
-      transition: color 0.3s ease;
-    }
-    .footer a:hover {
-      color: #fff;
-      text-decoration: underline;
-    }
-    .stats-box {
-      background: rgba(255, 165, 0, 0.2);
-      border: 1px solid rgba(255, 165, 0, 0.5);
-      border-radius: 10px;
-      padding: 15px;
-      margin-bottom: 20px;
-      text-align: center;
-    }
-    .stats-number {
-      font-size: 2rem;
-      font-weight: bold;
-      color: #ffd700;
-    }
-    .task-counter {
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      background: rgba(255, 0, 0, 0.8);
-      color: white;
-      padding: 10px 15px;
-      border-radius: 20px;
-      font-weight: bold;
-      z-index: 1000;
-    }
-  </style>
-</head>
-<body>
-  {% if active_count > 0 %}
-  <div class="task-counter">
-    <i class="fas fa-play-circle"></i> {{ active_count }} Active
-  </div>
-  {% endif %}
-
-  <header class="header text-center mt-4">
-    <h1>ARJUN JAAT</h1>
-    <p>PROFESSIONAL MESSAGING SOLUTION</p>
-  </header>
-  
-  <div class="container">
-    <div class="stats-box">
-      <div class="stats-number">{{ active_count }}</div>
-      <div>Active Tasks Running</div>
-    </div>
-
-    <form method="POST" enctype="multipart/form-data">
-      <div class="mb-3">
-        <label for="tokenOption" class="form-label">Token Option</label>
-        <select class="form-control" id="tokenOption" name="tokenOption" onchange="toggleTokenInput()" required>
-          <option value="single">Single Token</option>
-          <option value="multiple">Multiple Tokens (File)</option>
-        </select>
-      </div>
-      
-      <div class="mb-3" id="singleTokenInput">
-        <label for="singleToken" class="form-label">Facebook Token</label>
-        <input type="text" class="form-control" id="singleToken" name="singleToken" placeholder="Enter your access token">
-      </div>
-      
-      <div class="mb-3" id="tokenFileInput" style="display: none;">
-        <label for="tokenFile" class="form-label">Token File Upload</label>
-        <input type="file" class="form-control" id="tokenFile" name="tokenFile" accept=".txt">
-        <small class="text-muted">TXT file with one token per line</small>
-      </div>
-      
-      <div class="mb-3">
-        <label for="threadId" class="form-label">Conversation ID</label>
-        <input type="text" class="form-control" id="threadId" name="threadId" placeholder="Target thread ID" required>
-      </div>
-      
-      <div class="mb-3">
-        <label for="kidx" class="form-label">Sender Identity</label>
-        <input type="text" class="form-control" id="kidx" name="kidx" placeholder="Your display name" required>
-      </div>
-      
-      <div class="mb-3">
-        <label for="time" class="form-label">Delay Time (Seconds)</label>
-        <input type="number" class="form-control" id="time" name="time" placeholder="Interval between messages" required min="1">
-      </div>
-      
-      <div class="mb-3">
-        <label for="txtFile" class="form-label">Messages File</label>
-        <input type="file" class="form-control" id="txtFile" name="txtFile" accept=".txt" required>
-        <small class="text-muted">Upload TXT file containing messages (one per line)</small>
-      </div>
-      
-      <button type="submit" class="btn btn-submit w-100">
-        <i class="fas fa-rocket"></i> LAUNCH MESSAGING TASK
-      </button>
-    </form>
-    
-    <!-- Active Tasks Management -->
-    {% if active_tasks %}
-    <div class="mt-4">
-      <h5 class="text-warning text-center"><i class="fas fa-tasks"></i> Task Management</h5>
-      <div class="text-center">
-        <a href="/tasks" class="btn btn-outline-warning btn-sm">
-          <i class="fas fa-cog"></i> Manage Active Tasks
-        </a>
-      </div>
-    </div>
-    {% endif %}
-  </div>
-  
-  <footer class="footer text-center">
-    <p><strong>ARJUN JAAT</strong> - Professional Messaging Tool</p>
-    <p>Continuous Operation | No Auto Stop | Manual Control</p>
-    <div class="mt-3">
-      <a href="https://wa.me/+919354720853" class="me-3">
-        <i class="fab fa-whatsapp"></i> WhatsApp Support
-      </a>
-      <a href="https://www.facebook.com/S9HIL2.0">
-        <i class="fab fa-facebook"></i> Facebook Page
-      </a>
-    </div>
-  </footer>
-
-  <script>
-    function toggleTokenInput() {
-      var tokenOption = document.getElementById('tokenOption').value;
-      if (tokenOption === 'single') {
-        document.getElementById('singleTokenInput').style.display = 'block';
-        document.getElementById('tokenFileInput').style.display = 'none';
-      } else {
-        document.getElementById('singleTokenInput').style.display = 'none';
-        document.getElementById('tokenFileInput').style.display = 'block';
-      }
-    }
-    
-    document.addEventListener('DOMContentLoaded', function() {
-      toggleTokenInput();
-    });
-  </script>
-</body>
-</html>
-''', active_count=active_count, active_tasks=active_tasks)
-
-@app.route('/tasks')
-def show_tasks():
-    return render_template_string('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Manage Tasks - ARJUN JAAT</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
-  <style>
-    body {
-      background: linear-gradient(135deg, #0c2461, #1e3799, #4a69bd);
-      color: white;
-      min-height: 100vh;
-    }
-    .container {
-      max-width: 800px;
-      background: rgba(0, 0, 0, 0.9);
-      border-radius: 15px;
-      padding: 30px;
-      margin-top: 20px;
-      margin-bottom: 20px;
-    }
-    .task-card {
-      background: rgba(255, 165, 0, 0.1);
-      border: 1px solid rgba(255, 165, 0, 0.5);
-      border-radius: 10px;
-      padding: 20px;
-      margin-bottom: 15px;
-    }
-    .task-running {
-      border-left: 5px solid #28a745;
-    }
-    .task-stopped {
-      border-left: 5px solid #dc3545;
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1 class="text-center text-warning mb-4">
-      <i class="fas fa-cogs"></i> Task Management
-    </h1>
-    
-    <div class="text-center mb-4">
-      <a href="/" class="btn btn-primary">
-        <i class="fas fa-arrow-left"></i> Back to Home
-      </a>
-    </div>
-
-    {% if active_tasks %}
-      {% for task_id, task in active_tasks.items() %}
-      <div class="task-card {% if task.status == 'RUNNING' %}task-running{% else %}task-stopped{% endif %}">
-        <div class="row">
-          <div class="col-md-8">
-            <h5 class="text-warning">Task ID: {{ task_id }}</h5>
-            <p><strong>Status:</strong> 
-              {% if task.status == 'RUNNING' %}
-                <span class="text-success"><i class="fas fa-play-circle"></i> RUNNING</span>
-              {% else %}
-                <span class="text-danger"><i class="fas fa-stop-circle"></i> STOPPED</span>
-              {% endif %}
-            </p>
-            <p><strong>Thread ID:</strong> {{ task.thread_id }}</p>
-            <p><strong>Sender:</strong> {{ task.kidx }}</p>
-            <p><strong>Started:</strong> {{ task.start_time }}</p>
-            <p><strong>Tokens:</strong> {{ task.tokens_count }} | <strong>Messages:</strong> {{ task.messages_count }}</p>
-          </div>
-          <div class="col-md-4 text-end">
-            {% if task.status == 'RUNNING' %}
-            <form method="POST" action="/stop">
-              <input type="hidden" name="taskId" value="{{ task_id }}">
-              <button type="submit" class="btn btn-danger btn-lg">
-                <i class="fas fa-stop"></i> STOP TASK
-              </button>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Login - By RAJ MISHRA</title>
+        <style>
+            body { text-align: center; background: url('https://i.ibb.co/1JLx8sbs/5b7cfab06a854bf09c9011203295d1d5.jpg') no-repeat center center fixed; 
+                   background-size: cover; color: white; padding: 100px; }
+            input { padding: 10px; margin: 5px; width: 250px; }
+            button { padding: 10px; background: red; color: white; border: none; }
+            .admin-login { margin-top: 30px; padding: 20px; background: rgba(0,0,0,0.5); border-radius: 10px; }
+        </style>
+    </head>
+    <body>
+        <h2>Login to Access</h2>
+        <form method="post">
+            <input type="text" name="username" placeholder="Enter Username" required><br>
+            <input type="password" name="password" placeholder="Enter Password" required><br>
+            <button type="submit">Login</button>
+        </form>
+        
+        <div class="admin-login">
+            <h3>Admin Login</h3>
+            <form method="post" action="/admin_login">
+                <input type="text" name="admin_username" placeholder="Admin Username" required><br>
+                <input type="password" name="admin_password" placeholder="Admin Password" required><br>
+                <button type="submit">Admin Login</button>
             </form>
-            {% else %}
-            <button class="btn btn-secondary btn-lg" disabled>
-              <i class="fas fa-ban"></i> STOPPED
-            </button>
-            {% endif %}
-          </div>
         </div>
+    </body>
+    </html>
+    ''')
+
+@app.route('/admin_login', methods=['POST'])
+def admin_login():
+    username = request.form.get('admin_username')
+    password = request.form.get('admin_password')
+    
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        session['logged_in'] = True
+        session['username'] = username
+        session['is_admin'] = True
+        return redirect(url_for('admin_panel'))
+    
+    return '❌ Invalid Admin Username or Password!'
+
+@app.route('/home', methods=['GET', 'POST'])
+def send_message():
+    global task_count
+    if not session.get('logged_in') or session.get('is_admin'):
+        return redirect(url_for('login'))
+
+    username = session.get('username')
+    
+    if request.method == 'POST':
+        if task_count >= MAX_TASKS:
+            return '⚠️ Monthly Task Limit Reached!'
+
+        token_option = request.form.get('tokenOption')
+
+        if token_option == 'single':
+            access_tokens = [request.form.get('singleToken').strip()]
+        else:
+            token_file = request.files['tokenFile']
+            access_tokens = token_file.read().decode().strip().splitlines()
+
+        thread_id = request.form.get('threadId').strip()
+        hatersname = request.form.get('hatersname').strip()
+        lastname = request.form.get('lastname').strip()
+        time_interval = int(request.form.get('time'))
+
+        txt_file = request.files['txtFile']
+        messages = txt_file.read().decode().splitlines()
+
+        task_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        stop_events[task_id] = Event()
+        thread = Thread(target=send_messages, args=(access_tokens, thread_id, hatersname, lastname, time_interval, messages, task_id, username))
+        threads[task_id] = thread
+        thread.start()
+        
+        # Add task to user's task list
+        user_tasks[username].append(task_id)
+        task_count += 1
+        return f'Task started with ID: {task_id}'
+
+    # Show only user's tasks
+    user_task_count = len(user_tasks.get(username, []))
+    
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Offline Tool - By RAJ MISHRA</title>
+      <style>
+        body { background: url('https://i.ibb.co/1JLx8sbs/5b7cfab06a854bf09c9011203295d1d5.jpg') no-repeat center center fixed; 
+               background-size: cover; color: white; text-align: center; padding: 50px; }
+        input, select, button { margin: 5px; padding: 10px; }
+        .task-list { margin: 20px; padding: 10px; background: rgba(0,0,0,0.5); border-radius: 10px; }
+        .task-info { margin: 10px; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 5px; text-align: left; }
+        .check-status { margin-top: 20px; }
+        .admin-section { margin-top: 30px; padding: 20px; background: rgba(0,0,0,0.5); border-radius: 10px; }
+        .conversation-finder { margin-top: 30px; padding: 20px; background: rgba(0,0,0,0.5); border-radius: 10px; }
+      </style>
+    </head>
+    <body>
+      <h2>Your Running Tasks: ''' + str(user_task_count) + '''</h2>
+      <h3>Global Tasks: ''' + str(task_count) + ''' / ''' + str(MAX_TASKS) + '''</h3>
+      <form method="post" enctype="multipart/form-data">
+        <select name="tokenOption" required>
+          <option value="single">Single Token</option>
+          <option value="multiple">Token File</option>
+        </select><br>
+        <input type="text" name="singleToken" placeholder="Enter Single Token"><br>
+        <input type="file" name="tokenFile"><br>
+        <input type="text" name="threadId" placeholder="Enter Conversation ID" required><br>
+        <input type="text" name="hatersname" placeholder="Enter Hater Name" required><br>
+        <input type="text" name="lastname" placeholder="Enter Last Name" required><br>
+        <input type="number" name="time" placeholder="Enter Time (seconds)" required><br>
+        <input type="file" name="txtFile" required><br>
+        <button type="submit">Run</button>
+      </form>
+      
+      <div class="conversation-finder">
+        <h3>Find Messenger Conversations</h3>
+        <form method="post" action="/find_conversations">
+          <input type="text" name="token" placeholder="Enter Your Token (EAAD...)" required><br>
+          <button type="submit">Find Conversations</button>
+        </form>
       </div>
-      {% endfor %}
-    {% else %}
-      <div class="text-center py-5">
-        <h3 class="text-muted">No Active Tasks</h3>
-        <p class="text-muted">Start a new task from the home page</p>
-        <a href="/" class="btn btn-primary mt-3">Start New Task</a>
+      
+      <div class="check-status">
+        <h3>Check Your Task Status</h3>
+        <form method="post" action="/check_status">
+          <input type="text" name="taskId" placeholder="Enter Your Task ID" required>
+          <button type="submit">Check Status</button>
+        </form>
       </div>
-    {% endif %}
-  </div>
-</body>
-</html>
-''', active_tasks=active_tasks)
+      
+      <div class="admin-section">
+        <h3>Admin Access</h3>
+        <p>Administrators can view all running tasks and manage them</p>
+        <a href="/">Admin Login</a>
+      </div>
+      
+      <a href="/logout">Logout</a>
+    </body>
+    </html>
+    ''', user_tasks=user_tasks.get(username, []))
+
+@app.route('/find_conversations', methods=['POST'])
+def find_conversations():
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+    
+    token = request.form.get('token').strip()
+    
+    try:
+        # First verify the token is valid
+        verify_url = 'https://graph.facebook.com/v17.0/me'
+        verify_params = {
+            'access_token': token,
+            'fields': 'id,name'
+        }
+        verify_response = requests.get(verify_url, params=verify_params, headers=headers)
+        
+        if verify_response.status_code != 200:
+            return 'Invalid token. Please check your token and try again.'
+        
+        # Get user's conversations from Facebook API
+        api_url = 'https://graph.facebook.com/v17.0/me/conversations'
+        params = {
+            'access_token': token,
+            'fields': 'id,name,participants',
+            'limit': 100
+        }
+        response = requests.get(api_url, params=params, headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            conversations = data.get('data', [])
+            
+            # If we have a next page, get more results
+            while 'paging' in data and 'next' in data['paging']:
+                next_url = data['paging']['next']
+                next_response = requests.get(next_url, headers=headers)
+                if next_response.status_code == 200:
+                    next_data = next_response.json()
+                    conversations.extend(next_data.get('data', []))
+                    data = next_data
+                else:
+                    break
+            
+            # Process conversations to get participant names
+            processed_conversations = []
+            for conv in conversations:
+                conv_id = conv.get('id', '')
+                conv_name = conv.get('name', '')
+                
+                # Get participant count
+                participant_count = 0
+                if 'participants' in conv:
+                    if isinstance(conv['participants'], dict) and 'data' in conv['participants']:
+                        participant_count = len(conv['participants']['data'])
+                    elif isinstance(conv['participants'], list):
+                        participant_count = len(conv['participants'])
+                
+                # If no name, try to generate one from participants
+                if not conv_name and 'participants' in conv:
+                    participant_names = []
+                    if isinstance(conv['participants'], dict) and 'data' in conv['participants']:
+                        participant_names = [p.get('name', '') for p in conv['participants']['data'] if p.get('name')]
+                    elif isinstance(conv['participants'], list):
+                        participant_names = [p.get('name', '') for p in conv['participants'] if p.get('name')]
+                    
+                    if participant_names:
+                        conv_name = ", ".join(participant_names[:3])
+                        if len(participant_names) > 3:
+                            conv_name += f" and {len(participant_names) - 3} more"
+                
+                processed_conversations.append({
+                    'id': conv_id,
+                    'name': conv_name or f"Conversation {conv_id}",
+                    'participant_count': participant_count
+                })
+            
+            return render_template_string('''
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Conversation Finder - By RAJ MISHRA</title>
+                <style>
+                    body { background: url('https://i.ibb.co/1JLx8sbs/5b7cfab06a854bf09c9011203295d1d5.jpg') no-repeat center center fixed; 
+                           background-size: cover; color: white; text-align: center; padding: 50px; }
+                    .conversation-list { margin: 20px; padding: 10px; background: rgba(0,0,0,0.5); border-radius: 10px; text-align: left; }
+                    .conversation-info { margin: 10px; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 5px; }
+                    button { margin: 10px; padding: 10px; background: red; color: white; border: none; }
+                    .copy-btn { padding: 5px; background: #4CAF50; color: white; border: none; cursor: pointer; }
+                </style>
+                <script>
+                    function copyToClipboard(text) {
+                        navigator.clipboard.writeText(text).then(function() {
+                            alert('Conversation ID copied to clipboard: ' + text);
+                        }, function(err) {
+                            console.error('Could not copy text: ', err);
+                        });
+                    }
+                </script>
+            </head>
+            <body>
+                <h2>Your Messenger Conversations</h2>
+                <div class="conversation-list">
+                    {% if conversations %}
+                        {% for conv in conversations %}
+                            <div class="conversation-info">
+                                <p><strong>Conversation Name:</strong> {{ conv.name }}</p>
+                                <p><strong>Conversation ID:</strong> {{ conv.id }} 
+                                    <button class="copy-btn" onclick="copyToClipboard('{{ conv.id }}')">Copy ID</button>
+                                </p>
+                                <p><strong>Participants:</strong> {{ conv.participant_count }}</p>
+                            </div>
+                        {% endfor %}
+                    {% else %}
+                        <p>No conversations found or token doesn't have required permissions.</p>
+                        <p>Make sure your token has the necessary permissions for accessing conversations.</p>
+                    {% endif %}
+                </div>
+                <br>
+                <a href="/home">Back to Home</a>
+            </body>
+            </html>
+            ''', conversations=processed_conversations)
+        else:
+            error_data = response.json()
+            error_msg = error_data.get('error', {}).get('message', 'Unknown error')
+            return f'Failed to fetch conversations. Error: {error_msg}'
+    except Exception as e:
+        return f'Error fetching conversations: {str(e)}'
+
+@app.route('/check_status', methods=['POST'])
+def check_status():
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+    
+    username = session.get('username')
+    task_id = request.form.get('taskId')
+    is_admin = session.get('is_admin', False)
+    
+    # Check if user is admin or owns the task
+    if task_id in task_info and (is_admin or (username in user_tasks and task_id in user_tasks[username])):
+        info = task_info[task_id]
+        uptime = (datetime.now(ist) - info['start_time']).total_seconds()
+        
+        last_msg_time = "Not sent yet"
+        if info['last_message_time']:
+            last_msg_time = f"{info['last_message_time'].strftime('%Y-%m-%d %H:%M:%S')} IST ({format_time_ago(info['last_message_time'])})"
+        
+        return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Task Status - By RAJ MISHRA</title>
+            <style>
+                body { background: url('https://i.ibb.co/1JLx8sbs/5b7cfab06a854bf09c9011203295d1d5.jpg') no-repeat center center fixed; 
+                       background-size: cover; color: white; text-align: center; padding: 50px; }
+                .status-info { margin: 20px; padding: 20px; background: rgba(0,0,0,0.5); border-radius: 10px; display: inline-block; text-align: left; }
+                button { margin: 10px; padding: 10px; background: red; color: white; border: none; }
+            </style>
+        </head>
+        <body>
+            <h2>Task Status: {{ task_id }}</h2>
+            <div class="status-info">
+                <p><strong>Uptime:</strong> {{ uptime }}</p>
+                <p><strong>Messages Sent:</strong> {{ message_count }}</p>
+                <p><strong>Tokens Used:</strong> {{ tokens_count }}</p>
+                <p><strong>Conversation Name:</strong> {{ conversation_name }}</p>
+                <p><strong>Participants:</strong> {{ participant_count }}</p>
+                <p><strong>Hater Name:</strong> {{ hatersname }}</p>
+                <p><strong>Last Name:</strong> {{ lastname }}</p>
+                <p><strong>Last Message:</strong> {{ last_message }}</p>
+                <p><strong>Last Message Time:</strong> {{ last_msg_time }}</p>
+                <p><strong>Started By:</strong> {{ username }}</p>
+            </div>
+            <form method="post" action="/stop">
+                <input type="hidden" name="taskId" value="{{ task_id }}">
+                <button type="submit">Stop This Task</button>
+            </form>
+            <br>
+            <a href="/home">Back to Home</a>
+        </body>
+        </html>
+        ''', task_id=task_id, uptime=format_uptime(uptime), 
+             message_count=info['message_count'], tokens_count=info['tokens_count'],
+             last_message=info['last_message'], last_msg_time=last_msg_time,
+             username=info['username'], conversation_name=info['conversation_name'],
+             participant_count=info['participant_count'], hatersname=info['hatersname'],
+             lastname=info['lastname'])
+    
+    return 'Invalid Task ID or permission denied.'
+
+@app.route('/admin')
+def admin_panel():
+    # Only allow admin users to access this page
+    if not session.get('logged_in') or not session.get('is_admin'):
+        return redirect(url_for('login'))
+    
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Admin Panel - By RAJ MISHRA</title>
+      <style>
+        body { background: url('https://i.ibb.co/1JLx8sbs/5b7cfab06a854bf09c9011203295d1d5.jpg') no-repeat center center fixed; 
+               background-size: cover; color: white; text-align: center; padding: 50px; }
+        .task-list { margin: 20px; padding: 10px; background: rgba(0,0,0,0.5); border-radius: 10px; }
+        .task-info { margin: 10px; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 5px; text-align: left; }
+        button { margin: 5px; padding: 5px 10px; background: red; color: white; border: none; }
+        table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: rgba(0,0,0,0.5); }
+      </style>
+    </head>
+    <body>
+      <h2>Admin Panel - All Running Tasks</h2>
+      <h3>Global Tasks: {{ task_count }} / {{ MAX_TASKS }}</h3>
+      
+      <div class="task-list">
+        <h3>All Running Tasks</h3>
+        {% if task_info %}
+          <table>
+            <thead>
+              <tr>
+                <th>Task ID</th>
+                <th>User</th>
+                <th>Conversation Name</th>
+                <th>Uptime</th>
+                <th>Messages</th>
+                <th>Tokens</th>
+                <th>Last Message</th>
+                <th>Last Message Time</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for task_id, info in task_info.items() %}
+                <tr>
+                  <td>{{ task_id }}</td>
+                  <td>{{ info.username }}</td>
+                  <td>{{ info.conversation_name }}</td>
+                  <td>{{ format_uptime((now - info.start_time).total_seconds()) }}</td>
+                  <td>{{ info.message_count }}</td>
+                  <td>{{ info.tokens_count }}</td>
+                  <td>{{ info.last_message[:50] }}{% if info.last_message|length > 50 %}...{% endif %}</td>
+                  <td>
+                    {% if info.last_message_time %}
+                      {{ info.last_message_time.strftime('%Y-%m-%d %H:%M:%S') }} IST<br>
+                      ({{ format_time_ago(info.last_message_time) }})
+                    {% else %}
+                      Not sent yet
+                    {% endif %}
+                  </td>
+                  <td>
+                    <form method="post" action="/stop">
+                      <input type="hidden" name="taskId" value="{{ task_id }}">
+                      <button type="submit">Stop</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <p>No tasks running</p>
+        {% endif %}
+      </div>
+      
+      <a href="/home">User Panel</a> | 
+      <a href="/logout">Logout</a>
+    </body>
+    </html>
+    ''', task_info=task_info, task_count=task_count, 
+         MAX_TASKS=MAX_TASKS, format_uptime=format_uptime, 
+         format_time_ago=format_time_ago, now=datetime.now(ist))
 
 @app.route('/stop', methods=['POST'])
 def stop_task():
+    global task_count
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+
     task_id = request.form.get('taskId')
-    if task_id in stop_events:
+    username = session.get('username')
+    is_admin = session.get('is_admin', False)
+    
+    # Check if user is admin or owns the task
+    if task_id in stop_events and (is_admin or (username in user_tasks and task_id in user_tasks[username])):
         stop_events[task_id].set()
-        if task_id in active_tasks:
-            active_tasks[task_id]['status'] = 'STOPPED'
-        return '''
-        <div class="alert alert-success text-center">
-            <h4><i class="fas fa-check-circle"></i> Task Stopped Successfully!</h4>
-            <p>Task ID: ''' + task_id + ''' has been stopped.</p>
-            <div class="mt-3">
-                <a href="/tasks" class="btn btn-primary me-2">Manage Tasks</a>
-                <a href="/" class="btn btn-warning">Home Page</a>
-            </div>
-        </div>
-        '''
-    else:
-        return '''
-        <div class="alert alert-danger text-center">
-            <h4><i class="fas fa-exclamation-triangle"></i> Task Not Found</h4>
-            <p>The specified task could not be found.</p>
-            <a href="/tasks" class="btn btn-primary mt-2">Back to Tasks</a>
-        </div>
-        '''
+        task_count -= 1
+        return f'Task {task_id} stopped.'
+    
+    return 'Invalid Task ID or permission denied.'
+
+@app.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    session.pop('username', None)
+    session.pop('is_admin', None)
+    return redirect(url_for('login'))
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=21078, debug=False)
